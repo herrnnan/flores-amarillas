@@ -13,6 +13,7 @@ import {
 // reloj compartido: <Clock/> lo actualiza y el resto lo lee
 const S = { t: 0, st: 0, wind: 0, px: 0, py: 0, tx: 0, ty: 0 }
 
+const DEBUG = new URLSearchParams(window.location.search).has('fps') // para probar: ?fps muestra los cuadros por segundo
 const SOLO = new URLSearchParams(window.location.search).has('solo') // para probar: ?solo muestra el ramo sin el campo
 const SUN = new THREE.Vector3(-0.45, 0.2, -1).normalize()
 // el ramo va en un frasco arriba de un tronco, asi no queda flotando
@@ -522,7 +523,7 @@ function Wrap() {
   )
 }
 
-function Flowers({ flowers, bouquet, bouquetRef }) {
+function Flowers({ flowers, bouquet, bouquetRef, strideRef }) {
   const roots = useRef([])
   const heads = useRef([])
   const stems = useRef([])
@@ -630,8 +631,8 @@ function Flowers({ flowers, bouquet, bouquetRef }) {
     tmp.frame++
     for (let i = 0; i < all.length; i++) {
       const f = all[i]
-      // las del campo ya abiertas estan desenfocadas y casi quietas, las actualizo cada 2 frames
-      if (!f.bouquet && st > f.grow + f.bloomLag + 3.5 && (i + tmp.frame) % 2) continue
+      // las del campo ya abiertas estan desenfocadas y casi quietas, las salteo cada tantos frames
+      if (!f.bouquet && st > f.grow + f.bloomLag + 3.5 && (i + tmp.frame) % strideRef.current) continue
       const rec = kit.records[i]
       const root = roots.current[i]
       const head = heads.current[i]
@@ -786,8 +787,8 @@ const PROFILES = {
 
 // mide los FPS reales durante el show y baja de a un escalon si el aparato no da.
 // arranca a medir con la escena ya andando, si no mide la entrada que siempre es mas pesada
-function AutoQuality({ level, onChange }) {
-  const q = useRef({ t0: 0, skip: 0, frames: 0, prev: null, done: false })
+function AutoQuality({ level, floor, onChange, onFps }) {
+  const q = useRef({ t0: 0, skip: 0, frames: 0, base: null, done: false })
 
   useEffect(() => {
     q.current.t0 = 0
@@ -810,13 +811,14 @@ function AutoQuality({ level, onChange }) {
     r.t0 = 0
 
     const fps = (r.frames * 1000) / dt
-    const { action, level: next } = decide(level, fps, r.prev)
+    const { action, level: next } = decide(level, fps, r.base, floor)
+    onFps?.({ fps: Math.round(fps), level, action })
+    if (r.base == null) r.base = fps
     if (action === 'stay') {
       r.done = true
       return
     }
     if (action === 'back') r.done = true
-    else r.prev = { level, fps }
     onChange(next)
   })
 
@@ -855,10 +857,17 @@ export default function Scene({ mode, startedRef, reduced, camera: cameraOverrid
   const { P } = setup
 
   // arranca al maximo y AutoQuality lo va bajando solo si el aparato no llega
-  const [level, setLevel] = useState(() => (setup.phone ? startLevel() : 0))
+  const floor = useMemo(() => (setup.phone ? startLevel() : 0), [setup])
+  const [level, setLevel] = useState(floor)
+  const [fps, setFps] = useState(null)
   const cfg = STEPS[level]
   const maxDpr = mode === 'home' ? 1 : cfg.dpr
   const bg = (n) => Math.max(1, Math.round(n * cfg.bg))
+  // el stride va por ref: cambiarlo no tiene que re-renderizar todo el campo
+  const strideRef = useRef(cfg.stride)
+  useEffect(() => {
+    strideRef.current = cfg.stride
+  }, [cfg.stride])
   // en el menu la escena es solo fondo: en celu la dibujo una vez y no 60 por segundo
   const still = mode === 'home' && setup.phone
 
@@ -889,46 +898,55 @@ export default function Scene({ mode, startedRef, reduced, camera: cameraOverrid
   }, [])
 
   return (
-    <Canvas
-      style={{ position: 'fixed', inset: 0, width: '100vw', height: '100dvh' }}
-      frameloop={still ? 'demand' : 'always'}
-      dpr={[1, maxDpr]}
-      gl={{ antialias: false, powerPreference: 'high-performance', toneMapping: THREE.NoToneMapping }}
-      camera={{ fov: setup.cam.fov, position: setup.cam.pos, near: 0.05, far: 220 }}
-    >
-      {!still && mode !== 'home' && <AutoQuality level={level} onChange={setLevel} />}
-      {still && <Settle />}
+    <>
+      <Canvas
+        style={{ position: 'fixed', inset: 0, width: '100vw', height: '100dvh' }}
+        frameloop={still ? 'demand' : 'always'}
+        dpr={[1, maxDpr]}
+        gl={{ antialias: false, powerPreference: 'high-performance', toneMapping: THREE.NoToneMapping }}
+        camera={{ fov: setup.cam.fov, position: setup.cam.pos, near: 0.05, far: 220 }}
+      >
+        {!still && mode !== 'home' && (
+          <AutoQuality level={level} floor={floor} onChange={setLevel} onFps={DEBUG ? setFps : undefined} />
+        )}
+        {still && <Settle />}
 
-      <Clock mode={mode} startedRef={startedRef} />
-      <fog attach="fog" args={[HORIZON, 18, 68]} />
-      <Sky />
+        <Clock mode={mode} startedRef={startedRef} />
+        <fog attach="fog" args={[HORIZON, 18, 68]} />
+        <Sky />
 
-      <hemisphereLight args={['#ffeaba', '#2e4a10', 0.75]} />
-      <directionalLight position={[5, 7, 8]} intensity={2.9} color="#fff0c8" />
-      <directionalLight position={[-7, 5, -9]} intensity={2.4} color="#ffc76a" />
+        <hemisphereLight args={['#ffeaba', '#2e4a10', 0.75]} />
+        <directionalLight position={[5, 7, 8]} intensity={2.9} color="#fff0c8" />
+        <directionalLight position={[-7, 5, -9]} intensity={2.4} color="#ffc76a" />
 
-      <mesh rotation-x={-Math.PI / 2} position-y={-0.02}>
-        <circleGeometry args={[70, 48]} />
-        <meshStandardMaterial color="#4a6a1e" roughness={1} />
-      </mesh>
+        <mesh rotation-x={-Math.PI / 2} position-y={-0.02}>
+          <circleGeometry args={[70, 48]} />
+          <meshStandardMaterial color="#4a6a1e" roughness={1} />
+        </mesh>
 
-      {!SOLO && <Grass count={bg(P.grass)} reach={setup.grassReach} />}
-      {!SOLO && <FarBlossoms count={bg(P.blossoms)} />}
-      <Flowers flowers={SOLO ? [] : flowers} bouquet={bouquet} bouquetRef={bouquetRef} />
-      <FallingPetals count={bg(P.petals)} />
-      <Pollen count={bg(P.pollen)} />
-      <Rays n={P.rays} />
-      <Stand />
-      <Halo />
-      <Burst count={bg(P.burst)} />
-      <CameraRig cam={setup.cam} mode={mode} reduced={reduced} />
+        {!SOLO && <Grass count={bg(P.grass)} reach={setup.grassReach} />}
+        {!SOLO && <FarBlossoms count={bg(P.blossoms)} />}
+        <Flowers flowers={SOLO ? [] : flowers} bouquet={bouquet} bouquetRef={bouquetRef} strideRef={strideRef} />
+        <FallingPetals count={bg(P.petals)} />
+        <Pollen count={bg(P.pollen)} />
+        <Rays n={P.rays} />
+        <Stand />
+        <Halo />
+        <Burst count={bg(P.burst)} />
+        <CameraRig cam={setup.cam} mode={mode} reduced={reduced} />
 
-      <EffectComposer multisampling={cfg.msaa} disableNormalPass frameBufferType={THREE.HalfFloatType}>
-        {cfg.dof && <DepthOfField target={BOUQUET.focus} worldFocusRange={1.6} bokehScale={5} />}
-        <Bloom intensity={0.7} luminanceThreshold={0.78} luminanceSmoothing={0.25} mipmapBlur radius={0.7} />
-        <ToneMapping mode={ToneMappingMode.ACES_FILMIC} />
-        <Vignette offset={0.28} darkness={0.42} />
-      </EffectComposer>
-    </Canvas>
+        <EffectComposer multisampling={cfg.msaa} disableNormalPass frameBufferType={THREE.HalfFloatType}>
+          {cfg.dof && <DepthOfField target={BOUQUET.focus} worldFocusRange={1.6} bokehScale={5} resolutionScale={cfg.dofRes} />}
+          <Bloom intensity={0.7} luminanceThreshold={0.78} luminanceSmoothing={0.25} mipmapBlur radius={0.7} />
+          <ToneMapping mode={ToneMappingMode.ACES_FILMIC} />
+          <Vignette offset={0.28} darkness={0.42} />
+        </EffectComposer>
+      </Canvas>
+      {DEBUG && fps && (
+        <div className="fixed left-3 top-3 z-50 rounded bg-black/70 px-2 py-1 font-mono text-xs text-lime-300">
+          {fps.fps} fps · nivel {fps.level} → {fps.action}
+        </div>
+      )}
+    </>
   )
 }
